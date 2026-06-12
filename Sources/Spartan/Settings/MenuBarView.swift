@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct MenuBarView: View {
     @ObservedObject var coordinator: AppCoordinator
@@ -31,6 +32,17 @@ struct MenuBarView: View {
         }
         .padding(12)
         .frame(width: 340)
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            for provider in providers {
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url else { return }
+                    Task { @MainActor in
+                        DocumentReportWindowController.shared.show(url: url)
+                    }
+                }
+            }
+            return true
+        }
     }
 
     private var header: some View {
@@ -143,6 +155,14 @@ struct MenuBarView: View {
                 }
                 .pickerStyle(.segmented)
             }
+
+            Button {
+                pickDocument()
+            } label: {
+                Label("Check a document…", systemImage: "doc.text.magnifyingglass")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
 
             exclusionsRow
 
@@ -267,6 +287,20 @@ struct MenuBarView: View {
         case "cache": return "\(pct) ⊙"
         case "fuzzy": return "\(pct) ≈"
         default: return pct
+        }
+    }
+
+    private func pickDocument() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        var types: [UTType] = [.pdf, .plainText]
+        if let md = UTType(filenameExtension: "md") { types.append(md) }
+        if let docx = UTType(filenameExtension: "docx") { types.append(docx) }
+        panel.allowedContentTypes = types
+        if panel.runModal() == .OK, let url = panel.url {
+            DocumentReportWindowController.shared.show(url: url)
         }
     }
 

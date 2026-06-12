@@ -425,5 +425,28 @@ Task {
 }
 storeSem.wait()
 
+// MARK: - DocumentChunker
+
+print("DocumentChunker")
+let docInput = [
+    words(100, seed: "alpha"),                  // own full section
+    words(25, seed: "beta"),                    // pending (25w)
+    words(25, seed: "gamma"),                   // accumulates to 50w lowConf
+    (0..<25).map { "Sentence \($0)." }.joined(separator: " "),  // long sentences, packs once
+    (0..<20).map { "delta\($0) " + words(24, seed: "delta\($0)_") + "." }
+        .joined(separator: " "),                // ~500 words across many sentences
+    words(10, seed: "tail"),                    // discarded
+].joined(separator: "\n\n")
+
+let docSections = DocumentChunker.sections(from: docInput)
+check(docSections.contains { $0.text.hasPrefix("alpha0") && !$0.lowConfidence },
+      "≥75-word paragraph becomes its own reliable section")
+check(docSections.contains { $0.text.contains("beta0") && $0.text.contains("gamma0") && $0.lowConfidence },
+      "two 25-word paragraphs merge into one low-confidence section")
+let longSplits = docSections.filter { $0.text.hasPrefix("delta") }
+check(longSplits.count >= 2, "500-word paragraph splits at sentence boundaries")
+check(!docSections.contains { $0.text.hasPrefix("tail0") },
+      "10-word tail is discarded")
+
 print(failures == 0 ? "\nAll checks passed." : "\n\(failures) check(s) FAILED.")
 exit(failures == 0 ? 0 : 1)
