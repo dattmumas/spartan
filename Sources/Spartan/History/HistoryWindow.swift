@@ -14,15 +14,11 @@ final class HistoryWindowController {
             NSApp.activate(ignoringOtherApps: true)
             return
         }
-        let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 480),
-            styleMask: [.titled, .closable, .resizable],
-            backing: .buffered, defer: false
+        let w = makeReportWindow(
+            title: "Spartan History",
+            size: NSSize(width: 560, height: 480),
+            root: HistoryView()
         )
-        w.title = "Spartan History"
-        w.isReleasedWhenClosed = false
-        w.center()
-        w.contentView = NSHostingView(rootView: HistoryView())
         window = w
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -98,7 +94,7 @@ private struct VerdictRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            scoreCapsule
+            ScoreCapsule(score: record.score)
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
                     if let headline = record.headline {
@@ -127,7 +123,7 @@ private struct VerdictRow: View {
             if record.screenshotFile != nil {
                 Button("Reveal screenshot") {
                     Task {
-                        if let url = await coordinator.verdicts.url(forScreenshot: record) {
+                        if let url = await coordinator.verdictScreenshotURL(record) {
                             NSWorkspace.shared.activateFileViewerSelecting([url])
                         }
                     }
@@ -136,15 +132,4 @@ private struct VerdictRow: View {
         }
     }
 
-    private var scoreCapsule: some View {
-        let pct = Int((record.score * 100).rounded())
-        let color: Color = record.score >= 0.5 ? .red : .green
-        return Text("\(pct)%")
-            .font(.caption.monospacedDigit().bold())
-            .foregroundColor(.white)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(color.opacity(0.85), in: Capsule())
-            .frame(width: 52, alignment: .center)
-    }
 }

@@ -116,46 +116,50 @@ final class DocumentScanner: ObservableObject {
         await runScan(sections: sections)
     }
 
+    /// Sections fan out in waves of 5 — PangramClient's own concurrency cap
+    /// and token bucket pace the actual requests, and rows are index-addressed
+    /// so out-of-order completion is safe. All scoring goes through the
+    /// coordinator's shared obtainScore (budget, cache, history, and
+    /// credential-error pausing identical to every other scan path).
     private func runScan(sections: [DocumentChunker.Section]) async {
         running = true
         defer { running = false }
-        for (i, section) in sections.enumerated() {
-            progressText = "Scoring \(i + 1) / \(sections.count)"
-            let passage = Passage(
-                text: section.text, lines: [], lowConfidence: section.lowConfidence
-            )
-            let lookup = await coordinator.cache.lookup(passage)
-            switch lookup {
-            case .exact(let r), .fuzzy(let r):
-                applyResult(r, to: i, source: "cache")
-                continue
-            case .miss:
-                break
+        var completed = 0
+        let total = sections.count
+        let waveSize = 5
+        var index = 0
+        while index < sections.count {
+            let wave = Array(sections.enumerated())[index..<min(index + waveSize, sections.count)]
+            await withTaskGroup(of: Void.self) { group in
+                for (i, section) in wave {
+                    group.addTask { @MainActor in
+                        await self.scoreSection(section, at: i)
+                    }
+                }
             }
-            if coordinator.state.requestsToday >= coordinator.state.dailyCap {
-                rows[i].error = "Daily cap reached"
-                continue
-            }
-            coordinator.state.requestsToday += 1
-            do {
-                let result = try await coordinator.detector.detect(section.text)
-                await coordinator.cache.store(result, for: passage)
-                applyResult(result, to: i, source: "api")
-                let record = VerdictRecord(
-                    appName: url.lastPathComponent, source: "document",
-                    passageHash: passage.hash, text: section.text,
-                    words: passage.wordCount, score: result.aiLikelihood,
-                    headline: result.prediction, lowConfidence: section.lowConfidence
-                )
-                await coordinator.verdicts.append(record, screenshot: nil)
-            } catch let error as DetectorError {
-                rows[i].error = error.description
-            } catch {
-                rows[i].error = error.localizedDescription
-            }
+            completed += wave.count
+            progressText = "Scored \(min(completed, total)) / \(total)"
+            index += waveSize
         }
         finalizeSummary()
         progressText = "Done — \(rows.compactMap(\.score).count) of \(rows.count) scored."
+    }
+
+    private func scoreSection(_ section: DocumentChunker.Section, at i: Int) async {
+        let passage = Passage(
+            text: section.text, lines: [], lowConfidence: section.lowConfidence
+        )
+        let outcome = await coordinator.obtainScore(
+            for: passage, appName: url.lastPathComponent, recordSource: "document"
+        )
+        switch outcome {
+        case .scored(let result, let source):
+            applyResult(result, to: i, source: source)
+        case .budgetExhausted:
+            rows[i].error = "Daily cap reached"
+        case .failed(let message):
+            rows[i].error = message
+        }
     }
 
     private func applyResult(_ r: DetectionResult, to index: Int, source: String) {

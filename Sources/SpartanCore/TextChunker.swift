@@ -128,9 +128,12 @@ public struct TextChunker: Sendable {
             ).map(Self.foldScalar)
             let probeLen = min(18, max(3, normalized.count - 2))
             let probe = Array(normalized.prefix(probeLen))
-            if let start = probe.isEmpty
-                ? nil
-                : Self.findSubsequence(probe, in: haystack, from: cursor) {
+            // Probes under 3 scalars match spuriously; treat such lines as
+            // unmatched (they take the cursor-position empty range, which
+            // downstream means "fallback score" — never a wrong attribution).
+            if let start = probe.count >= 3
+                ? Self.findSubsequence(probe, in: haystack, from: cursor)
+                : nil {
                 starts.append(start)
                 // Advance cursor a few scalars past the start so the next line
                 // doesn't match the same span, but don't skip far enough to

@@ -33,11 +33,11 @@ final class AppCoordinator: ObservableObject {
     private let stability: StabilityDetector
     private let recognizer = TextRecognizer()
     private let chunker = TextChunker()
-    let cache = PassageCache(
+    private let cache = PassageCache(
         persistURL: SpartanPaths.dir().appendingPathComponent("cache.json")
     )
-    let detector: PangramClient
-    let verdicts = VerdictStore(directory: SpartanPaths.dir("History"))
+    private let detector: PangramClient
+    private let verdicts = VerdictStore(directory: SpartanPaths.dir("History"))
     private lazy var overlay = OverlayWindowController(state: state)
 
     private var tracked: TrackedWindow?
@@ -175,6 +175,9 @@ final class AppCoordinator: ObservableObject {
         verdicts.csv(records: records)
     }
     func verdictsDirectory() -> URL { SpartanPaths.dir("History") }
+    func verdictScreenshotURL(_ record: VerdictRecord) async -> URL? {
+        await verdicts.url(forScreenshot: record)
+    }
 
     private func startCacheFlush() {
         guard cacheFlushTimer == nil else { return }
@@ -241,6 +244,20 @@ final class AppCoordinator: ObservableObject {
             return
         }
         handleAXSelection(text: sel.text, bounds: sel.bounds, force: true)
+
+        // Outside selection mode the AX monitor is stopped, so its onCleared
+        // (the normal popup-clearing path) never fires — without this timeout
+        // a hotkey verdict would stay pinned until the next window switch.
+        if state.scanMode != .selection {
+            let hash = TextNormalizer.hash(sel.text)
+            Task {
+                try? await Task.sleep(for: .seconds(12))
+                guard pinnedSelection?.hash == hash else { return }
+                axPinned = false
+                pinnedSelection = nil
+                overlay.setSelection(nil)
+            }
+        }
     }
 
     private func transientMessage(_ message: String, over window: TrackedWindow) {
@@ -292,9 +309,10 @@ final class AppCoordinator: ObservableObject {
         var window = window
         if let w = window, let id = w.bundleID {
             state.currentApp = CurrentApp(name: w.appName, bundleID: id)
-        } else {
-            state.currentApp = nil
         }
+        // window == nil usually means Spartan itself became frontmost (the
+        // popover is opening) — keep the last real app so the "Exclude X"
+        // button still refers to the app the user was just in.
         if let id = window?.bundleID, state.excludedBundleIDs.contains(id) {
             state.statusText = "Excluded: \(window!.appName)"
             logger.info("excluded app: \(id, privacy: .public)")
@@ -400,15 +418,18 @@ final class AppCoordinator: ObservableObject {
                 return
             }
 
+            let appName = window.appName
             var misses: [Passage] = []
             for passage in passages {
                 switch await cache.lookup(passage) {
                 case .exact(let result):
                     addRegion(for: passage, result: result, windowSize: windowSize,
                               gen: gen, source: "cache")
+                    recordHit(passage, appName: appName)
                 case .fuzzy(let result):
                     addRegion(for: passage, result: result, windowSize: windowSize,
                               gen: gen, source: "fuzzy")
+                    recordHit(passage, appName: appName)
                 case .miss:
                     misses.append(passage)
                 }
@@ -427,18 +448,33 @@ final class AppCoordinator: ObservableObject {
                 ))
             }
 
-            let appName = window.appName
+            // One full-frame decode serves every passage's screenshot crop;
+            // both run off the main actor.
+            let frameImage = toQuery.isEmpty ? nil : await FrameCropper.image(from: buffer)
             for passage in toQuery {
-                if state.requestsToday >= state.dailyCap {
-                    state.lastError = "Daily budget (\(state.dailyCap)) reached — paused"
-                    setPaused(true)
-                    return
+                let bbox = GeometryMapping.union(of: passage.lines.map(\.bbox))
+                Task {
+                    let shot = await FrameCropper.png(
+                        from: frameImage, normalizedRect: bbox
+                    )
+                    let outcome = await self.obtainScore(
+                        for: passage, appName: appName,
+                        recordSource: "continuous", screenshot: shot
+                    )
+                    switch outcome {
+                    case .scored(let result, let source):
+                        self.addRegion(for: passage, result: result,
+                                       windowSize: windowSize, gen: gen, source: source)
+                    case .budgetExhausted:
+                        self.state.lastError = "Daily budget (\(self.state.dailyCap)) reached — paused"
+                        self.setPaused(true)
+                    case .failed(let message):
+                        self.state.addLog(ScanLogEntry(
+                            preview: message, words: passage.wordCount,
+                            score: nil, source: "error"
+                        ))
+                    }
                 }
-                state.requestsToday += 1
-                let bbox = Self.normalizedUnion(of: passage.lines)
-                let screenshot = FrameCropper.png(from: buffer, normalizedRect: bbox)
-                query(passage, windowSize: windowSize, gen: gen,
-                      appName: appName, screenshot: screenshot)
             }
             if gen == generation {
                 state.statusText = "Watching \(window.appName)"
@@ -446,49 +482,78 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    /// Union of OCR-line bboxes in Vision-normalized (bottom-left) coordinates.
-    static func normalizedUnion(of lines: [OCRLine]) -> CGRect {
-        guard var union = lines.first?.bbox else { return .zero }
-        for line in lines.dropFirst() { union = union.union(line.bbox) }
-        return union
+    /// Hits already have a result; route through obtainScore anyway so the
+    /// history record comes from the single recording path (it re-resolves
+    /// from cache instantly and the store dedupes per day).
+    private func recordHit(_ passage: Passage, appName: String) {
+        Task {
+            _ = await self.obtainScore(
+                for: passage, appName: appName, recordSource: "continuous"
+            )
+        }
     }
 
-    private func query(
-        _ passage: Passage,
-        windowSize: CGSize,
-        gen: Int,
+    // MARK: - Shared scoring service
+
+    enum ScoreOutcome {
+        case scored(DetectionResult, source: String)  // "cache" | "fuzzy" | "api"
+        case budgetExhausted
+        case failed(String)
+    }
+
+    /// The ONE path from passage to score: cache lookup → budget check →
+    /// Pangram call → cache store → history record → credential-error pausing.
+    /// Continuous, selection, hotkey, and document scoring all go through
+    /// here so billing policy can never diverge between them. Cache hits are
+    /// recorded to history too (the store dedupes per passage per day) so the
+    /// "everything highlighted is in History" invariant holds across launches.
+    func obtainScore(
+        for passage: Passage,
         appName: String,
-        screenshot: Data?
-    ) {
-        Task {
-            do {
-                let result = try await detector.detect(passage.text)
-                await cache.store(result, for: passage)
-                addRegion(for: passage, result: result, windowSize: windowSize,
-                          gen: gen, source: "api")
-                let record = VerdictRecord(
-                    appName: appName, source: "continuous",
-                    passageHash: passage.hash, text: passage.text,
-                    words: passage.wordCount, score: result.aiLikelihood,
-                    headline: result.prediction, lowConfidence: passage.lowConfidence
-                )
-                await verdicts.append(record, screenshot: screenshot)
-            } catch let error as DetectorError {
-                logger.error("pangram error: \(error.description)")
-                state.lastError = error.description
-                state.addLog(ScanLogEntry(
-                    preview: error.description, words: passage.wordCount,
-                    score: nil, source: "error"
-                ))
-                switch error {
-                case .invalidAPIKey, .outOfCredits, .missingAPIKey:
-                    setPaused(true)
-                default:
-                    break
-                }
-            } catch {
-                state.lastError = error.localizedDescription
+        recordSource: String,
+        screenshot: Data? = nil
+    ) async -> ScoreOutcome {
+        func record(_ result: DetectionResult, shot: Data?) async {
+            let record = VerdictRecord(
+                appName: appName, source: recordSource,
+                passageHash: passage.hash, text: passage.text,
+                words: passage.wordCount, score: result.aiLikelihood,
+                headline: result.prediction, lowConfidence: passage.lowConfidence
+            )
+            await verdicts.append(record, screenshot: shot)
+        }
+
+        switch await cache.lookup(passage) {
+        case .exact(let result):
+            await record(result, shot: nil)
+            return .scored(result, source: "cache")
+        case .fuzzy(let result):
+            await record(result, shot: nil)
+            return .scored(result, source: "fuzzy")
+        case .miss:
+            break
+        }
+
+        guard state.requestsToday < state.dailyCap else { return .budgetExhausted }
+        state.requestsToday += 1
+        do {
+            let result = try await detector.detect(passage.text)
+            await cache.store(result, for: passage)
+            await record(result, shot: screenshot)
+            return .scored(result, source: "api")
+        } catch let error as DetectorError {
+            logger.error("pangram error: \(error.description)")
+            state.lastError = error.description
+            switch error {
+            case .invalidAPIKey, .outOfCredits, .missingAPIKey:
+                setPaused(true)
+            default:
+                break
             }
+            return .failed(error.description)
+        } catch {
+            state.lastError = error.localizedDescription
+            return .failed(error.localizedDescription)
         }
     }
 
@@ -584,50 +649,20 @@ final class AppCoordinator: ObservableObject {
         overlay.setSelection(SelectionVerdict(phase: .checking, anchor: anchor, lineRects: lineRects))
 
         let passage = Passage(text: text, lines: [], lowConfidence: words < 75)
+        let appName = tracked?.appName ?? "?"
         Task {
-            var detection: DetectionResult?
-            var errorText: String?
-            switch await cache.lookup(passage) {
-            case .exact(let r), .fuzzy(let r):
-                detection = r
-            case .miss:
-                if state.requestsToday >= state.dailyCap {
-                    errorText = "Daily budget (\(state.dailyCap)) reached"
-                } else {
-                    state.requestsToday += 1
-                    do {
-                        let r = try await detector.detect(text)
-                        await cache.store(r, for: passage)
-                        detection = r
-                    } catch let error as DetectorError {
-                        errorText = error.description
-                        state.lastError = error.description
-                        switch error {
-                        case .invalidAPIKey, .outOfCredits, .missingAPIKey:
-                            setPaused(true)
-                        default: break
-                        }
-                    } catch {
-                        errorText = error.localizedDescription
-                    }
-                }
-            }
+            let outcome = await obtainScore(
+                for: passage, appName: appName, recordSource: "selection"
+            )
             guard pinnedSelection?.hash == hash else { return }  // superseded
-            if let detection {
+            switch outcome {
+            case .scored(let detection, _):
                 let latencyMs = Int(Date().timeIntervalSince(settledAt) * 1000)
                 logger.info("selection score=\(String(format: "%.4f", detection.aiLikelihood), privacy: .public) words=\(words, privacy: .public) +\(latencyMs, privacy: .public)ms")
                 state.addLog(ScanLogEntry(
                     preview: String(text.prefix(60)), words: words,
                     score: detection.aiLikelihood, source: "select"
                 ))
-                let appName = tracked?.appName ?? "?"
-                let record = VerdictRecord(
-                    appName: appName, source: "selection",
-                    passageHash: hash, text: text, words: words,
-                    score: detection.aiLikelihood, headline: detection.prediction,
-                    lowConfidence: words < 75
-                )
-                Task { await verdicts.append(record, screenshot: nil) }
                 overlay.setSelection(SelectionVerdict(
                     phase: .scored(
                         likelihood: detection.aiLikelihood,
@@ -636,9 +671,14 @@ final class AppCoordinator: ObservableObject {
                     ),
                     anchor: anchor, lineRects: lineRects
                 ))
-            } else {
+            case .budgetExhausted:
                 overlay.setSelection(SelectionVerdict(
-                    phase: .error(errorText ?? "Detection failed"),
+                    phase: .error("Daily budget (\(state.dailyCap)) reached"),
+                    anchor: anchor, lineRects: lineRects
+                ))
+            case .failed(let message):
+                overlay.setSelection(SelectionVerdict(
+                    phase: .error(message),
                     anchor: anchor, lineRects: lineRects
                 ))
             }
@@ -694,9 +734,13 @@ final class AppCoordinator: ObservableObject {
                 fromNormalized: $0.bbox, windowSize: windowSize, inflateBy: 2
             )
         }
+        // Fuzzy hits reuse a DIFFERENT passage's result: its window offsets
+        // index into the original text, not this one — mapping them here would
+        // tint the wrong lines. Fall back to passage-level scoring.
+        let usableWindows = source == "fuzzy" ? [] : result.windows
         let scores = WindowMapping.perLineScores(
             lineRanges: passage.lineRanges,
-            windows: result.windows,
+            windows: usableWindows,
             fallback: result.aiLikelihood
         )
         currentRegions.append(RenderableRegion(

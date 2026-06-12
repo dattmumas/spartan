@@ -15,16 +15,10 @@ final class DocumentReportWindowController {
             return
         }
         let scanner = DocumentScanner(url: url)
-        let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 520),
-            styleMask: [.titled, .closable, .resizable],
-            backing: .buffered, defer: false
-        )
-        w.title = url.lastPathComponent
-        w.isReleasedWhenClosed = false
-        w.center()
-        w.contentView = NSHostingView(
-            rootView: DocumentReportView(scanner: scanner)
+        let w = makeReportWindow(
+            title: url.lastPathComponent,
+            size: NSSize(width: 640, height: 520),
+            root: DocumentReportView(scanner: scanner)
         )
         windows[url] = w
         w.makeKeyAndOrderFront(nil)
@@ -152,15 +146,7 @@ private struct SectionRow: View {
     @ViewBuilder
     private var scoreView: some View {
         if let score = row.score {
-            let pct = Int((score * 100).rounded())
-            let color: Color = score >= 0.5 ? .red : .green
-            Text("\(pct)%")
-                .font(.caption.monospacedDigit().bold())
-                .foregroundColor(.white)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(color.opacity(0.85), in: Capsule())
-                .frame(width: 52, alignment: .center)
+            ScoreCapsule(score: score)
         } else if row.error != nil {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundColor(.orange)

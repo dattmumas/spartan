@@ -195,7 +195,10 @@ public actor VerdictStore {
         }
     }
 
-    private static func dayString(_ date: Date) -> String {
+    /// The canonical calendar-day key (fixed POSIX locale/Gregorian rendering
+    /// so day boundaries agree everywhere: history filenames, dedupe keys,
+    /// and the daily request counter).
+    public static func dayString(_ date: Date = Date()) -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd"

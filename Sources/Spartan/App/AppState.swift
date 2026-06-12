@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import SpartanCore
 
 enum DisplayMode: String, CaseIterable, Identifiable {
     case highlight = "Highlight"
@@ -121,8 +122,6 @@ final class AppState: ObservableObject {
     }
 
     private static func dayStamp() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: Date())
+        VerdictStore.dayString()
     }
 }

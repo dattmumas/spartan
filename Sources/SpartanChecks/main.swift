@@ -174,6 +174,25 @@ check(WindowMapping.perLineScores(lineRanges: ranges, windows: [], fallback: 0.4
         == [0.42, 0.42, 0.42],
       "empty windows array yields fallback per line")
 
+// Tiny lines (probe < 3 scalars) must take the empty-range fallback path
+// rather than spuriously matching some early occurrence.
+let tinyLines = [
+    OCRLine(text: "ab", bbox: .zero, confidence: 1),
+    OCRLine(text: "The future is here", bbox: .zero, confidence: 1),
+]
+let tinyJoined = TextChunker.joinLines(tinyLines)
+let tinyRanges = TextChunker.lineRanges(of: tinyLines, in: tinyJoined)
+check(tinyRanges.count == 2
+        && tinyRanges[0].lowerBound == 0
+        && tinyRanges[0].upperBound <= tinyRanges[1].lowerBound,
+      "sub-3-scalar lines never spuriously match; ranges stay ordered and disjoint")
+_ = tinyJoined
+
+// Day keys must agree across subsystems: fixed POSIX yyyy-MM-dd shape.
+let day = VerdictStore.dayString(Date(timeIntervalSince1970: 0))
+check(day == "1970-01-01" || day == "1969-12-31",  // timezone-dependent day
+      "dayString is POSIX yyyy-MM-dd (got \(day))")
+
 // MARK: - GeometryMapping
 
 print("GeometryMapping")
