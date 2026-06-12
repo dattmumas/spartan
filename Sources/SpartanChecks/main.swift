@@ -122,11 +122,57 @@ let v3JSON = #"{"version":"3.3.2","headline":"AI Generated","prediction":"We bel
 let v3 = try? JSONDecoder().decode(PangramResponse.self, from: Data(v3JSON.utf8))
 check(v3.map { abs($0.aiLikelihood - 1.0) < 0.0001 && $0.prediction == "AI Generated" } ?? false,
       "v3 response: fraction_ai + assisted, headline as prediction")
+check(v3?.windows.isEmpty ?? false, "v3 response without windows decodes to []")
+
+let v3WindowsJSON = #"""
+{"version":"3.3.2","headline":"Mixed","fraction_ai":0.5,"fraction_ai_assisted":0.0,"windows":[{"label":"AI-Generated","ai_assistance_score":0.97,"confidence":"High","start_index":12,"end_index":45,"word_count":6,"token_length":8},{"label":"Human","ai_assistance_score":0.03,"confidence":"Medium","start_index":46,"end_index":80,"word_count":6,"token_length":8}]}
+"""#
+let v3w = try? JSONDecoder().decode(PangramResponse.self, from: Data(v3WindowsJSON.utf8))
+check(v3w?.windows.count == 2 && v3w?.windows.first?.label == "AI-Generated"
+        && v3w?.windows.first?.startIndex == 12 && v3w?.windows.first?.endIndex == 45,
+      "v3 windows array decodes with field renames")
 
 let legacyJSON = #"{"ai_likelihood":0.93,"prediction":"Likely AI"}"#
 let legacy = try? JSONDecoder().decode(PangramResponse.self, from: Data(legacyJSON.utf8))
-check(legacy.map { $0.aiLikelihood == 0.93 && $0.prediction == "Likely AI" } ?? false,
-      "legacy response shape still decodes")
+check(legacy.map { $0.aiLikelihood == 0.93 && $0.prediction == "Likely AI" && $0.windows.isEmpty } ?? false,
+      "legacy response shape still decodes; windows = []")
+
+// DetectionResult cache compatibility: old snapshot lacks `windows` key.
+let oldSnapshot = #"{"aiLikelihood":0.42,"prediction":"AI","requestID":null,"date":768000000}"#
+let oldDR = try? JSONDecoder().decode(DetectionResult.self, from: Data(oldSnapshot.utf8))
+check(oldDR?.aiLikelihood == 0.42 && (oldDR?.windows.isEmpty ?? false),
+      "DetectionResult decodes pre-windows snapshot with default []")
+
+// lineRanges: 3 synthetic lines join (incl. hyphen rejoin) — each range
+// should overlap the line's first identifiable word.
+let lr0 = OCRLine(text: "Renewable energy is power-", bbox: .zero, confidence: 1)
+let lr1 = OCRLine(text: "ful and clean", bbox: .zero, confidence: 1)
+let lr2 = OCRLine(text: "The future is here", bbox: .zero, confidence: 1)
+let joinedLR = TextChunker.joinLines([lr0, lr1, lr2])
+let ranges = TextChunker.lineRanges(of: [lr0, lr1, lr2], in: joinedLR)
+check(ranges.count == 3, "lineRanges returns one range per line")
+let scalars = Array(joinedLR.unicodeScalars)
+func slice(_ r: Range<Int>) -> String {
+    String(String.UnicodeScalarView(scalars[r.clamped(to: 0..<scalars.count)]))
+        .lowercased()
+}
+check(slice(ranges[0]).contains("renewable"), "first line range contains its text")
+check(slice(ranges[2]).contains("future"), "third line range contains its text")
+
+// perLineScores: window spanning only line 2 at 0.99 with fallback 0.1 →
+// [0.1, 0.99, 0.1].
+let win1 = DetectionWindow(label: "AI", aiAssistanceScore: 0.99, confidence: "High",
+                           startIndex: ranges[1].lowerBound, endIndex: ranges[1].upperBound)
+let perLine = WindowMapping.perLineScores(
+    lineRanges: ranges, windows: [win1], fallback: 0.1
+)
+check(perLine.count == 3 && abs(perLine[0] - 0.1) < 0.001
+        && abs(perLine[1] - 0.99) < 0.001 && abs(perLine[2] - 0.1) < 0.001,
+      "perLineScores assigns window to overlapping line only")
+
+check(WindowMapping.perLineScores(lineRanges: ranges, windows: [], fallback: 0.42)
+        == [0.42, 0.42, 0.42],
+      "empty windows array yields fallback per line")
 
 // MARK: - GeometryMapping
 

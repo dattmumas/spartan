@@ -7,7 +7,8 @@ struct OverlayView: View {
 
     var body: some View {
         Canvas { context, size in
-            for region in model.regions where region.likelihood >= state.threshold {
+            for region in model.regions
+            where (region.lineScores.max() ?? region.likelihood) >= state.threshold {
                 draw(region, in: &context)
             }
             if let selection = model.selection {
@@ -39,9 +40,9 @@ struct OverlayView: View {
             (label, tint) = ("Checking…", .gray)
         case .tooShort:
             (label, tint) = ("Selection too short to score (need ~15+ words)", .orange)
-        case .scored(let likelihood, let lowConfidence):
+        case .scored(let likelihood, let headline, let lowConfidence):
             let pct = Int((likelihood * 100).rounded())
-            let verdict = likelihood >= 0.5 ? "AI Generated" : "Human-written"
+            let verdict = headline ?? (likelihood >= 0.5 ? "AI Generated" : "Human-written")
             let suffix = lowConfidence ? " · short sample" : ""
             (label, tint) = ("\(verdict) · \(pct)% AI\(suffix)",
                              likelihood >= 0.5 ? .red : .green)
@@ -78,24 +79,31 @@ struct OverlayView: View {
     }
 
     private func draw(_ region: RenderableRegion, in context: inout GraphicsContext) {
-        let union = GeometryMapping.union(of: region.lineRects)
-
-        for rect in region.lineRects {
+        // Per-line drawing: only render lines whose own score crosses the
+        // threshold. A mixed passage shows the AI sentences and leaves the
+        // human ones alone.
+        var drawnRects: [CGRect] = []
+        for (rect, score) in zip(region.lineRects, region.lineScores)
+        where score >= state.threshold {
             let path = Path(roundedRect: rect, cornerRadius: 3)
             switch state.mode {
             case .highlight:
-                let opacity = 0.18 + 0.25 * region.likelihood
+                let opacity = 0.18 + 0.25 * score
                 context.fill(path, with: .color(.red.opacity(opacity)))
                 context.stroke(path, with: .color(.red.opacity(0.7)), lineWidth: 1)
             case .block:
                 context.fill(path, with: .color(.black))
             }
+            drawnRects.append(rect)
         }
+        guard !drawnRects.isEmpty else { return }
+        let union = GeometryMapping.union(of: drawnRects)
+        let badgeScore = region.lineScores.max() ?? region.likelihood
 
         // Score badge at the passage's top-right corner.
-        let label = region.lowConfidence
-            ? "AI \(Int(region.likelihood * 100))%?"
-            : "AI \(Int(region.likelihood * 100))%"
+        let prefix = region.headline ?? "AI"
+        let suffix = region.lowConfidence ? "?" : ""
+        let label = "\(prefix) \(Int(badgeScore * 100))%\(suffix)"
         let text = Text(label)
             .font(.system(size: 11, weight: .semibold, design: .rounded))
             .foregroundColor(.white)

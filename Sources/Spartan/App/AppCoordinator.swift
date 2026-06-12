@@ -542,7 +542,11 @@ final class AppCoordinator: ObservableObject {
                     score: detection.aiLikelihood, source: "select"
                 ))
                 overlay.setSelection(SelectionVerdict(
-                    phase: .scored(likelihood: detection.aiLikelihood, lowConfidence: words < 40),
+                    phase: .scored(
+                        likelihood: detection.aiLikelihood,
+                        headline: detection.prediction,
+                        lowConfidence: words < 40
+                    ),
                     anchor: anchor, lineRects: lineRects
                 ))
             } else {
@@ -603,9 +607,18 @@ final class AppCoordinator: ObservableObject {
                 fromNormalized: $0.bbox, windowSize: windowSize, inflateBy: 2
             )
         }
+        let scores = WindowMapping.perLineScores(
+            lineRanges: passage.lineRanges,
+            windows: result.windows,
+            fallback: result.aiLikelihood
+        )
         currentRegions.append(RenderableRegion(
             lineRects: rects,
+            lineScores: scores.isEmpty
+                ? Array(repeating: result.aiLikelihood, count: rects.count)
+                : scores,
             likelihood: result.aiLikelihood,
+            headline: result.prediction,
             lowConfidence: passage.lowConfidence
         ))
         overlay.setRegions(currentRegions)

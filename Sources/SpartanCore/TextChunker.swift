@@ -109,6 +109,70 @@ public struct TextChunker: Sendable {
         return after < t.endIndex && t[after] == " "
     }
 
+    /// For each line, the range of unicodeScalar offsets covering its
+    /// contribution to `joined`. Located by scanning forward for a
+    /// whitespace-collapsed lowercased prefix of the line. Unmatched lines
+    /// get an empty range at the previous cursor — callers should treat them
+    /// as "no overlap" rather than crashing on indexing.
+    ///
+    /// Approximate matching is intentional: consumers (per-line score mapping)
+    /// only need overlap with Pangram window character offsets, not exactness.
+    public static func lineRanges(of lines: [OCRLine], in joined: String) -> [Range<Int>] {
+        let haystack = Array(joined.unicodeScalars).map(Self.foldScalar)
+        var starts: [Int] = []
+        starts.reserveCapacity(lines.count)
+        var cursor = 0
+        for line in lines {
+            let normalized = Array(
+                TextNormalizer.normalize(line.text).unicodeScalars
+            ).map(Self.foldScalar)
+            let probeLen = min(18, max(3, normalized.count - 2))
+            let probe = Array(normalized.prefix(probeLen))
+            if let start = probe.isEmpty
+                ? nil
+                : Self.findSubsequence(probe, in: haystack, from: cursor) {
+                starts.append(start)
+                // Advance cursor a few scalars past the start so the next line
+                // doesn't match the same span, but don't skip far enough to
+                // miss legitimate next-line content (especially after a
+                // hyphen-rejoin where two lines share characters).
+                cursor = min(haystack.count, start + max(1, probe.count / 2))
+            } else {
+                starts.append(cursor)
+            }
+        }
+        var ranges: [Range<Int>] = []
+        ranges.reserveCapacity(starts.count)
+        for i in 0..<starts.count {
+            let upper = (i + 1 < starts.count) ? starts[i + 1] : haystack.count
+            ranges.append(starts[i]..<max(starts[i], upper))
+        }
+        return ranges
+    }
+
+    private static func foldScalar(_ s: Unicode.Scalar) -> Unicode.Scalar {
+        let v = s.value
+        if (0x41...0x5A).contains(v) { return Unicode.Scalar(v + 0x20)! }
+        return s
+    }
+
+    private static func findSubsequence(
+        _ needle: [Unicode.Scalar],
+        in haystack: [Unicode.Scalar],
+        from offset: Int
+    ) -> Int? {
+        guard !needle.isEmpty, haystack.count >= needle.count else { return nil }
+        var i = max(0, offset)
+        let last = haystack.count - needle.count
+        while i <= last {
+            var j = 0
+            while j < needle.count, haystack[i + j] == needle[j] { j += 1 }
+            if j == needle.count { return i }
+            i += 1
+        }
+        return nil
+    }
+
     /// Joins lines in the given order, rejoining hyphenated line breaks.
     /// Shared by the chunker and the selection-mode text assembly.
     public static func joinLines(_ lines: [OCRLine]) -> String {

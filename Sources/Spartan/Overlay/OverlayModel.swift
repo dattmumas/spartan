@@ -1,11 +1,16 @@
 import Foundation
 import SwiftUI
 
-/// One scored passage ready to draw: line rects are window-local points (top-left origin).
+/// One scored passage ready to draw: line rects are window-local points
+/// (top-left origin). When `lineScores` contains a per-line value derived from
+/// Pangram v3's `windows`, the overlay can tint only the AI sentences inside
+/// a mixed passage; otherwise every line takes `likelihood`.
 struct RenderableRegion: Identifiable {
     let id = UUID()
     let lineRects: [CGRect]
+    let lineScores: [Double]
     let likelihood: Double
+    let headline: String?
     let lowConfidence: Bool
 }
 
@@ -14,7 +19,7 @@ struct SelectionVerdict {
     enum Phase {
         case checking
         case tooShort
-        case scored(likelihood: Double, lowConfidence: Bool)
+        case scored(likelihood: Double, headline: String?, lowConfidence: Bool)
         case error(String)
     }
 
