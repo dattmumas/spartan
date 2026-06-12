@@ -60,7 +60,9 @@ final class AppCoordinator: ObservableObject {
     /// the visual classifier stands down until AX reports the selection gone.
     private var axPinned = false
     private let axMonitor = AXSelectionMonitor()
+    private let hotKey = HotKeyManager()
     private var cacheFlushTimer: Timer?
+    private var transientMessageToken = 0
 
     private let perSettleBudget = 8
 
@@ -154,6 +156,9 @@ final class AppCoordinator: ObservableObject {
         }
         updateAXMonitor()
 
+        HotKeyManager.trigger = { [weak self] in self?.hotkeyScore() }
+        hotKey.register()
+
         stability.start()
         tracker.start()
         startCacheFlush()
@@ -223,8 +228,45 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    private func handleAXSelection(text: String, bounds: CGRect?) {
-        guard state.scanMode == .selection, !state.paused, let window = tracked else { return }
+    func hotkeyScore() {
+        guard let window = tracked else { return }
+        guard AXSelectionMonitor.isTrusted,
+              let sel = AXSelectionMonitor.currentSelection(pid: window.ownerPID),
+              !sel.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            let message = AXSelectionMonitor.isTrusted
+                ? "⌘⇧A: nothing selected"
+                : "⌘⇧A needs Accessibility — grant it from the popover"
+            transientMessage(message, over: window)
+            return
+        }
+        handleAXSelection(text: sel.text, bounds: sel.bounds, force: true)
+    }
+
+    private func transientMessage(_ message: String, over window: TrackedWindow) {
+        overlay.show(overCGFrame: window.frame)
+        let anchor = CGRect(
+            x: window.frame.width / 2 - 140, y: 24,
+            width: 280, height: 10
+        )
+        overlay.setSelection(SelectionVerdict(
+            phase: .error(message), anchor: anchor, lineRects: []
+        ))
+        transientMessageToken &+= 1
+        let token = transientMessageToken
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            guard token == transientMessageToken,
+                  case .error(let current) = overlay.model.selection?.phase,
+                  current == message
+            else { return }
+            overlay.setSelection(nil)
+        }
+    }
+
+    private func handleAXSelection(text: String, bounds: CGRect?, force: Bool = false) {
+        guard force || state.scanMode == .selection,
+              !state.paused, let window = tracked else { return }
         state.axTrusted = true
         settledAt = Date()
         // AX bounds are global CG top-left; the overlay draws window-local.

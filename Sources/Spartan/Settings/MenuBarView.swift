@@ -126,7 +126,7 @@ struct MenuBarView: View {
             .pickerStyle(.segmented)
 
             if state.scanMode == .selection {
-                Text("Select 15+ words in any window — Spartan pops up the AI score.")
+                Text("Select 15+ words in any window — Spartan pops up the AI score. ⌘⇧A scores the current selection in any mode.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 if !state.axTrusted {
@@ -154,6 +154,10 @@ struct MenuBarView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+
+                Text("⌘⇧A scores the current selection in any mode.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
 
             Button {
