@@ -37,6 +37,7 @@ final class AppCoordinator: ObservableObject {
         persistURL: SpartanPaths.dir().appendingPathComponent("cache.json")
     )
     let detector: PangramClient
+    let verdicts = VerdictStore(directory: SpartanPaths.dir("History"))
     private lazy var overlay = OverlayWindowController(state: state)
 
     private var tracked: TrackedWindow?
@@ -156,7 +157,19 @@ final class AppCoordinator: ObservableObject {
         stability.start()
         tracker.start()
         startCacheFlush()
+        let retention = state.retentionDays
+        Task { await verdicts.purge(olderThanDays: retention) }
     }
+
+    // History passthroughs (verdicts must stay an actor, but the History UI
+    // doesn't need to know that or share state).
+    func verdictsRecent(limit: Int) async -> [VerdictRecord] {
+        await verdicts.recent(limit: limit)
+    }
+    nonisolated func verdictsCSV(_ records: [VerdictRecord]) -> String {
+        verdicts.csv(records: records)
+    }
+    func verdictsDirectory() -> URL { SpartanPaths.dir("History") }
 
     private func startCacheFlush() {
         guard cacheFlushTimer == nil else { return }
@@ -372,6 +385,7 @@ final class AppCoordinator: ObservableObject {
                 ))
             }
 
+            let appName = window.appName
             for passage in toQuery {
                 if state.requestsToday >= state.dailyCap {
                     state.lastError = "Daily budget (\(state.dailyCap)) reached — paused"
@@ -379,7 +393,10 @@ final class AppCoordinator: ObservableObject {
                     return
                 }
                 state.requestsToday += 1
-                query(passage, windowSize: windowSize, gen: gen)
+                let bbox = Self.normalizedUnion(of: passage.lines)
+                let screenshot = FrameCropper.png(from: buffer, normalizedRect: bbox)
+                query(passage, windowSize: windowSize, gen: gen,
+                      appName: appName, screenshot: screenshot)
             }
             if gen == generation {
                 state.statusText = "Watching \(window.appName)"
@@ -387,13 +404,33 @@ final class AppCoordinator: ObservableObject {
         }
     }
 
-    private func query(_ passage: Passage, windowSize: CGSize, gen: Int) {
+    /// Union of OCR-line bboxes in Vision-normalized (bottom-left) coordinates.
+    static func normalizedUnion(of lines: [OCRLine]) -> CGRect {
+        guard var union = lines.first?.bbox else { return .zero }
+        for line in lines.dropFirst() { union = union.union(line.bbox) }
+        return union
+    }
+
+    private func query(
+        _ passage: Passage,
+        windowSize: CGSize,
+        gen: Int,
+        appName: String,
+        screenshot: Data?
+    ) {
         Task {
             do {
                 let result = try await detector.detect(passage.text)
                 await cache.store(result, for: passage)
                 addRegion(for: passage, result: result, windowSize: windowSize,
                           gen: gen, source: "api")
+                let record = VerdictRecord(
+                    appName: appName, source: "continuous",
+                    passageHash: passage.hash, text: passage.text,
+                    words: passage.wordCount, score: result.aiLikelihood,
+                    headline: result.prediction, lowConfidence: passage.lowConfidence
+                )
+                await verdicts.append(record, screenshot: screenshot)
             } catch let error as DetectorError {
                 logger.error("pangram error: \(error.description)")
                 state.lastError = error.description
@@ -541,6 +578,14 @@ final class AppCoordinator: ObservableObject {
                     preview: String(text.prefix(60)), words: words,
                     score: detection.aiLikelihood, source: "select"
                 ))
+                let appName = tracked?.appName ?? "?"
+                let record = VerdictRecord(
+                    appName: appName, source: "selection",
+                    passageHash: hash, text: text, words: words,
+                    score: detection.aiLikelihood, headline: detection.prediction,
+                    lowConfidence: words < 75
+                )
+                Task { await verdicts.append(record, screenshot: nil) }
                 overlay.setSelection(SelectionVerdict(
                     phase: .scored(
                         likelihood: detection.aiLikelihood,

@@ -380,5 +380,50 @@ check(TextChunker.joinLines([
     OCRLine(text: "formation done", bbox: .zero, confidence: 1),
 ]) == "first part transformation done", "joinLines rejoins hyphenated breaks")
 
+// MARK: - VerdictStore
+
+print("VerdictStore")
+let storeSem = DispatchSemaphore(value: 0)
+Task {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("spartan-verdicts-" + UUID().uuidString)
+    let store = VerdictStore(directory: dir)
+    let now = Date()
+    let recA = VerdictRecord(
+        date: now, appName: "TestApp", source: "continuous",
+        passageHash: "aaaa", text: "First, quoted \"value\"\nand a newline",
+        words: 5, score: 0.91, headline: "AI Generated", lowConfidence: false
+    )
+    let wroteA = await store.append(recA, screenshot: Data([0x89, 0x50, 0x4E, 0x47]))
+    check(wroteA, "first append returns true")
+    let dupA = await store.append(recA, screenshot: nil)
+    check(!dupA, "same-day duplicate passageHash is skipped")
+    let recB = VerdictRecord(
+        date: now, appName: "TestApp", source: "selection",
+        passageHash: "bbbb", text: "Second record",
+        words: 2, score: 0.12, headline: "Human", lowConfidence: true
+    )
+    _ = await store.append(recB, screenshot: nil)
+    let listed = await store.recent(limit: 10)
+    check(listed.count == 2, "recent returns both records")
+    check(listed.first?.passageHash == "bbbb", "newest record is first")
+
+    let csv = store.csv(records: listed)
+    check(csv.contains("\"First, quoted \"\"value\"\" and a newline\""),
+          "csv quotes commas, escapes quotes, and flattens newlines")
+    check(csv.contains("Second record"), "csv includes both rows")
+
+    // Purge old days: write a fake 2000-01-01 file.
+    let oldFile = dir.appendingPathComponent("2000-01-01.jsonl")
+    try? Data("\n".utf8).write(to: oldFile)
+    await store.purge(olderThanDays: 1)
+    check(!FileManager.default.fileExists(atPath: oldFile.path),
+          "purge deletes files older than cutoff")
+
+    try? FileManager.default.removeItem(at: dir)
+    storeSem.signal()
+}
+storeSem.wait()
+
 print(failures == 0 ? "\nAll checks passed." : "\n\(failures) check(s) FAILED.")
 exit(failures == 0 ? 0 : 1)

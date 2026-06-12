@@ -43,6 +43,13 @@ struct MenuBarView: View {
                 Text(state.statusText)
                     .font(.caption)
                     .foregroundColor(.secondary)
+                Button {
+                    HistoryWindowController.shared.show()
+                } label: {
+                    Image(systemName: "clock.arrow.circlepath")
+                }
+                .buttonStyle(.plain)
+                .help("Open history")
             }
             if let error = state.lastError {
                 Text(error)
