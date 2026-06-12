@@ -6,6 +6,7 @@ struct TrackedWindow: Equatable {
     let frame: CGRect
     let ownerPID: pid_t
     let appName: String
+    let bundleID: String?
 }
 
 /// Polls for the frontmost app's frontmost window (4 Hz) and reports
@@ -95,7 +96,8 @@ final class ActiveWindowTracker {
                 windowID: windowID,
                 frame: bounds,
                 ownerPID: ownerPID,
-                appName: app.localizedName ?? "app"
+                appName: app.localizedName ?? "app",
+                bundleID: app.bundleIdentifier
             )
         }
         return nil

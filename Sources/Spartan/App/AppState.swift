@@ -22,6 +22,11 @@ struct ScanLogEntry: Identifiable {
     let source: String  // "api" | "cache" | "fuzzy" | "error" | "info"
 }
 
+struct CurrentApp: Equatable {
+    let name: String
+    let bundleID: String
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var threshold: Double {
@@ -44,7 +49,36 @@ final class AppState: ObservableObject {
     }
     @Published var log: [ScanLogEntry] = []
 
-    let dailyCap = 500
+    /// Frontmost app right now (drives the "Exclude X" button), not persisted.
+    @Published var currentApp: CurrentApp?
+    @Published var excludedBundleIDs: Set<String> {
+        didSet {
+            UserDefaults.standard.set(Array(excludedBundleIDs), forKey: "excludedApps")
+        }
+    }
+    @Published var dailyCap: Int {
+        didSet { UserDefaults.standard.set(dailyCap, forKey: "dailyCap") }
+    }
+    @Published var costPerCheck: Double {
+        didSet { UserDefaults.standard.set(costPerCheck, forKey: "costPerCheck") }
+    }
+    @Published var retentionDays: Int {
+        didSet { UserDefaults.standard.set(retentionDays, forKey: "retentionDays") }
+    }
+
+    var estimatedCostToday: Double { Double(requestsToday) * costPerCheck }
+
+    /// Apps excluded by default on first launch: password managers, the system
+    /// password app, Keychain Access, Messages. Skips both privacy-sensitive
+    /// content and apps that show known passphrases in plaintext.
+    private static let defaultExclusions: Set<String> = [
+        "com.1password.1password",
+        "com.1password.1password7",
+        "com.bitwarden.desktop",
+        "com.apple.keychainaccess",
+        "com.apple.Passwords",
+        "com.apple.MobileSMS",
+    ]
 
     init() {
         let defaults = UserDefaults.standard
@@ -58,6 +92,20 @@ final class AppState: ObservableObject {
         } else {
             requestsToday = 0
         }
+
+        if defaults.bool(forKey: "exclusionsSeeded") {
+            let stored = defaults.array(forKey: "excludedApps") as? [String] ?? []
+            excludedBundleIDs = Set(stored)
+        } else {
+            excludedBundleIDs = Self.defaultExclusions
+            defaults.set(Array(Self.defaultExclusions), forKey: "excludedApps")
+            defaults.set(true, forKey: "exclusionsSeeded")
+        }
+
+        dailyCap = (defaults.object(forKey: "dailyCap") as? Int) ?? 500
+        costPerCheck = (defaults.object(forKey: "costPerCheck") as? Double) ?? 0.005
+        retentionDays = (defaults.object(forKey: "retentionDays") as? Int) ?? 30
+
         apiKeyPresent = KeychainStore.apiKey() != nil
     }
 

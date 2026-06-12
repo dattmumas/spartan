@@ -33,8 +33,10 @@ final class AppCoordinator: ObservableObject {
     private let stability: StabilityDetector
     private let recognizer = TextRecognizer()
     private let chunker = TextChunker()
-    private let cache = PassageCache()
-    private let detector: PangramClient
+    let cache = PassageCache(
+        persistURL: SpartanPaths.dir().appendingPathComponent("cache.json")
+    )
+    let detector: PangramClient
     private lazy var overlay = OverlayWindowController(state: state)
 
     private var tracked: TrackedWindow?
@@ -57,6 +59,7 @@ final class AppCoordinator: ObservableObject {
     /// the visual classifier stands down until AX reports the selection gone.
     private var axPinned = false
     private let axMonitor = AXSelectionMonitor()
+    private var cacheFlushTimer: Timer?
 
     private let perSettleBudget = 8
 
@@ -152,6 +155,17 @@ final class AppCoordinator: ObservableObject {
 
         stability.start()
         tracker.start()
+        startCacheFlush()
+    }
+
+    private func startCacheFlush() {
+        guard cacheFlushTimer == nil else { return }
+        let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.cache.saveIfDirty() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        cacheFlushTimer = timer
     }
 
     func setPaused(_ paused: Bool) {
@@ -215,7 +229,23 @@ final class AppCoordinator: ObservableObject {
         )
     }
 
+    func reapplyExclusions() {
+        handleWindowChanged(tracked, debounce: .zero)
+    }
+
     private func handleWindowChanged(_ window: TrackedWindow?, debounce: Duration) {
+        var window = window
+        if let w = window, let id = w.bundleID {
+            state.currentApp = CurrentApp(name: w.appName, bundleID: id)
+        } else {
+            state.currentApp = nil
+        }
+        if let id = window?.bundleID, state.excludedBundleIDs.contains(id) {
+            state.statusText = "Excluded: \(window!.appName)"
+            logger.info("excluded app: \(id, privacy: .public)")
+            window = nil
+        }
+
         tracked = window
         generation += 1
         currentRegions = []

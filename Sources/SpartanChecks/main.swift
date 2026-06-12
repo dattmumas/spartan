@@ -211,6 +211,24 @@ Task {
     } else {
         check(false, "LRU evicts oldest beyond capacity")
     }
+
+    // Persistence round-trip.
+    let tmpURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString + ".json")
+    let persistA = PassageCache(capacity: 10, persistURL: tmpURL)
+    let p = Passage(text: words(80, seed: "persist"), lines: [], lowConfidence: false)
+    await persistA.store(
+        DetectionResult(aiLikelihood: 0.42, prediction: "AI", requestID: nil),
+        for: p
+    )
+    await persistA.saveIfDirty()
+    let persistB = PassageCache(capacity: 10, persistURL: tmpURL)
+    if case .exact(let hit) = await persistB.lookup(p), hit.aiLikelihood == 0.42 {
+        check(true, "cache reloads from disk after saveIfDirty")
+    } else {
+        check(false, "cache reloads from disk after saveIfDirty")
+    }
+    try? FileManager.default.removeItem(at: tmpURL)
     sem.signal()
 }
 sem.wait()

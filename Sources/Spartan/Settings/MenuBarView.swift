@@ -137,8 +137,10 @@ struct MenuBarView: View {
                 .pickerStyle(.segmented)
             }
 
+            exclusionsRow
+
             HStack {
-                Text("API checks today: \(state.requestsToday) / \(state.dailyCap)")
+                Text("\(state.requestsToday)/\(state.dailyCap) checks · ≈ $\(String(format: "%.2f", state.estimatedCostToday)) today")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
@@ -149,6 +151,63 @@ struct MenuBarView: View {
                     .buttonStyle(.link)
                     .font(.caption)
                 }
+            }
+
+            DisclosureGroup("Budget") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Stepper("Daily cap: \(state.dailyCap)",
+                            value: $state.dailyCap, in: 50...5000, step: 50)
+                        .font(.caption)
+                    HStack {
+                        Text("$/check").font(.caption)
+                        TextField("0.005", text: Binding(
+                            get: { String(state.costPerCheck) },
+                            set: { state.costPerCheck = Double($0) ?? state.costPerCheck }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                        .font(.caption)
+                    }
+                }
+            }
+            .font(.caption)
+        }
+    }
+
+    @ViewBuilder
+    private var exclusionsRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let app = state.currentApp,
+               !state.excludedBundleIDs.contains(app.bundleID) {
+                Button("Exclude \(app.name) from scanning") {
+                    state.excludedBundleIDs.insert(app.bundleID)
+                    coordinator.reapplyExclusions()
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+            }
+            if !state.excludedBundleIDs.isEmpty {
+                DisclosureGroup("Excluded apps (\(state.excludedBundleIDs.count))") {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(state.excludedBundleIDs.sorted(), id: \.self) { id in
+                            HStack {
+                                Text(id).font(.caption2.monospaced())
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                Spacer()
+                                Button {
+                                    state.excludedBundleIDs.remove(id)
+                                    coordinator.reapplyExclusions()
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+                .font(.caption)
             }
         }
     }
